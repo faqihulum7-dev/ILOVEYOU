@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hand-Controlled Particles: I Love You</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; font-family: sans-serif; }
+        canvas { display: block; }
+        #ui {
+            position: absolute; top: 20px; left: 20px; 
+            background: rgba(0, 0, 0, 0.8); padding: 15px;
+            color: white; border-radius: 8px; border: 1px solid #444;
+            user-select: none; z-index: 10;
+        }
+        .control-group { margin-bottom: 10px; }
+        label { display: block; font-size: 12px; margin-bottom: 5px; color: #aaa; }
+        input[type="range"] { width: 100%; cursor: pointer; }
+        button { 
+            background: #333; color: white; border: 1px solid #555;
+            padding: 5px 10px; margin: 2px; cursor: pointer; border-radius: 4px;
+        }
+        button:hover { background: #555; }
+        #video-container { position: absolute; bottom: 20px; right: 20px; width: 160px; height: 120px; border: 2px solid #444; border-radius: 4px; overflow: hidden; }
+        video { transform: scaleX(-1); width: 100%; height: 100%; object-fit: cover; }
+    </style>
+</head>
+<body>
+
+<div id="ui">
+    <div class="control-group">
+        <label>Particle Control</label>
+        <button onclick="setMode('scatter')">Scatter</button>
+        <button onclick="setMode('iloveyou')">I Love You</button>
+    </div>
+    <div class="control-group">
+        <label>Force Strength</label>
+        <input type="range" id="forceStrength" min="0.1" max="5" step="0.1" value="1.5">
+    </div>
+    <div class="control-group">
+        <label>Influence Radius</label>
+        <input type="range" id="radius" min="1" max="10" step="0.5" value="4">
+    </div>
+</div>
+
+<div id="video-container">
+    <video id="webcam" autoplay playsinline></video>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+<script type="module">
+    import * as THREE from 'https://cdn.skypack.dev/three@0.136.0';
+
+    // --- Configuration ---
+    const COUNT = 20000;
+    const settings = {
+        force: 1.5,
+        radius: 4,
+        damping: 0.95,
+        returnSpeed: 0.05,
+        scatterRange: 15 // Jarak sebar partikel
+    };
+
+    // --- State ---
+    let handPos = new THREE.Vector3(0, 0, -100); // Off-screen initially
+    let isFist = false;
+    let currentMode = 'scatter'; // 'scatter' atau 'iloveyou'
+
+    // --- Three.js Setup ---
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+    camera.position.z = 15;
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(window.devicePixelRatio);
+    document.body.appendChild(renderer.domElement);
+
+    // --- Particle Geometry ---
+    const geometry = new THREE.BufferGeometry();
+    const positions = new Float32Array(COUNT * 3);
+    const targets = new Float32Array(COUNT * 3); // Ini akan berubah sesuai mode
+    const initialScatterPositions = new Float32Array(COUNT * 3); // Posisi sebar awal
+    const velocities = new Float32Array(COUNT * 3);
+    const colors = new Float32Array(COUNT * 3);
+
+    for (let i = 0; i < COUNT; i++) {
+        // Posisi awal acak
+        positions[i * 3] = (Math.random() - 0.5) * settings.scatterRange;
+        positions[i * 3 + 1] = (Math.random() - 0.5) * settings.scatterRange;
+        positions[i * 3 + 2] = (Math.random() - 0.5) * settings.scatterRange;
+
+        // Simpan posisi sebar awal untuk mode 'scatter'
+        initialScatterPositions[i * 3] = positions[i * 3];
+        initialScatterPositions[i * 3 + 1] = positions[i * 3 + 1];
+        initialScatterPositions[i * 3 + 2] = positions[i * 3 + 2];
+        
+        colors[i * 3] = 0.2 + Math.random() * 0.4; // R
+        colors[i * 3 + 1] = 0.5 + Math.random() * 0.5; // G
+        colors[i * 3 + 2] = 1.0; // B
+    }
+
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+    const material = new THREE.PointsMaterial({
+        size: 0.05,
+        vertexColors: true,
+        transparent: true,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false
+    });
+
+    const points = new THREE.Points(geometry, material);
+    scene.add(points);
+
+    // --- Text Shape Logic (I Love You) ---
+    // Fungsi ini akan mendapatkan posisi partikel untuk membentuk teks
+    // Kita akan menggunakan canvas 2D untuk "menggambar" teks dan membaca pikselnya
+    async function getTextShapePositions(text) {
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        const fontSize = 100;
+        const font = `${fontSize}px Arial Black`;
+
+        ctx.font = font;
+        const textMetrics = ctx.measureText(text);
+        const textWidth = textMetrics.width;
+        const textHeight = fontSize * 1.2; // Perkiraan tinggi teks
+
+        canvas.width = textWidth;
+        canvas.height = textHeight;
+
+        ctx.font = font;
+        ctx.fillStyle = 'white';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+        ctx.fillText(text, 0, 0);
+
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const pixels = [];
+
+        // Ambil posisi piksel yang tidak transparan
+        for (let y = 0; y < imageData.height; y++) {
+            for (let x = 0; x < imageData.width; x++) {
+                const alpha = imageData.data[((y * imageData.width + x) * 4) + 3];
+                if (alpha > 0) {
+                    // Normalisasi dan pusatkan
+                    pixels.push(
+                        (x - textWidth / 2) * 0.1, // Scale down the text
+                        (textHeight / 2 - y) * 0.1, // Invert Y and scale down
+                        (Math.random() - 0.5) * 1 // Sedikit kedalaman acak
+                    );
+                }
+            }
+        }
+
+        // Jika jumlah piksel kurang dari COUNT, kita perlu mengulang atau mengisi sisa
+        // Jika lebih, kita pilih secara acak
+        const finalPositions = new Float32Array(COUNT * 3);
+        for (let i = 0; i < COUNT; i++) {
+            const pixelIndex = i % pixels.length;
+            finalPositions[i * 3] = pixels[pixelIndex * 3];
+            finalPositions[i * 3 + 1] = pixels[pixelIndex * 3 + 1];
+            finalPositions[i * 3 + 2] = pixels[pixelIndex * 3 + 2];
+        }
+        return finalPositions;
+    }
+
+    let iloveyouTargets;
+    getTextShapePositions('I Love You').then(positions => {
+        iloveyouTargets = positions;
+        // Setelah diinisialisasi, panggil updateTargets pertama kali
+        updateTargets(); 
+    });
+
+
+    function updateTargets() {
+        if (!iloveyouTargets) return; // Pastikan iloveyouTargets sudah ada
+
+        for (let i = 0; i < COUNT; i++) {
+            if (currentMode === 'scatter') {
+                // Kembali ke posisi sebar acak awal
+                targets[i * 3] = initialScatterPositions[i * 3];
+                targets[i * 3 + 1] = initialScatterPositions[i * 3 + 1];
+                targets[i * 3 + 2] = initialScatterPositions[i * 3 + 2];
+            } else if (currentMode === 'iloveyou') {
+                // Menuju posisi teks "I Love You"
+                targets[i * 3] = iloveyouTargets[i * 3];
+                targets[i * 3 + 1] = iloveyouTargets[i * 3 + 1];
+                targets[i * 3 + 2] = iloveyouTargets[i * 3 + 2];
+            }
+        }
+    }
+
+    window.setMode = (mode) => { 
+        currentMode = mode; 
+        updateTargets(); // Panggil updateTargets setiap kali mode berubah
+    };
+    // Panggil updateTargets di awal untuk memastikan target awal terisi
+    // jika iloveyouTargets sudah siap
+    if (iloveyouTargets) {
+        updateTargets();
+    }
+
+
+    // --- MediaPipe Hand Tracking ---
+    const videoElement = document.getElementById('webcam');
+    const hands = new Hands({
+        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+    });
+
+    hands.setOptions({
+        maxNumHands: 1,
+        modelComplexity: 1,
+        minDetectionConfidence: 0.5,
+        minTrackingConfidence: 0.5
+    });
+
+    hands.onResults((results) => {
+        if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+            const landmark = results.multiHandLandmarks[0][9]; // Middle finger MCP (palm center approx)
+            
+            // Map 0-1 range to Three.js coordinates
+            handPos.x = (0.5 - landmark.x) * 30; 
+            handPos.y = (0.5 - landmark.y) * 20;
+            handPos.z = landmark.z * -20;
+
+            // Fist detection: Distance between thumb tip(4) and index tip(8)
+            const thumb = results.multiHandLandmarks[0][4];
+            const index = results.multiHandLandmarks[0][8];
+            const dist = Math.hypot(thumb.x - index.x, thumb.y - index.y);
+            isFist = dist < 0.08; // Threshold untuk mendeteksi kepalan tangan
+
+            // Perbarui mode berdasarkan kepalan tangan
+            if (isFist && currentMode !== 'iloveyou') {
+                setMode('iloveyou');
+            } else if (!isFist && currentMode !== 'scatter') {
+                setMode('scatter');
+            }
+
+        } else {
+            handPos.set(0, 0, -100); // Move away if no hand
+            // Jika tidak ada tangan terdeteksi, kembali ke mode sebar
+            if (currentMode !== 'scatter') {
+                setMode('scatter');
+            }
+        }
+    });
+
+    const cameraUtils = new Camera(videoElement, {
+        onFrame: async () => { await hands.send({ image: videoElement }); },
+        width: 640, height: 480
+    });
+    cameraUtils.start();
+
+    // --- Animation Loop ---
+    function animate() {
+        requestAnimationFrame(animate);
+        
+        const posAttr = geometry.attributes.position;
+        const forceMult = parseFloat(document.getElementById('forceStrength').value);
+        const radiusLimit = parseFloat(document.getElementById('radius').value);
+
+        for (let i = 0; i < COUNT; i++) {
+            const ix = i * 3, iy = i * 3 + 1, iz = i * 3 + 2;
+
+            // 1. Move toward target shape (scatter atau iloveyou)
+            velocities[ix] += (targets[ix] - posAttr.array[ix]) * settings.returnSpeed;
+            velocities[iy] += (targets[iy] - posAttr.array[iy]) * settings.returnSpeed;
+            velocities[iz] += (targets[iz] - posAttr.array[iz]) * settings.returnSpeed;
+
+            // 2. Hand Interaction (hanya jika mode 'scatter' dan tangan terbuka)
+            // Atau jika mode 'iloveyou' dan tangan mengepal, tapi kita ingin tangan menarik partikel ke bentuk teks,
+            // jadi interaksi dorong/tarik oleh tangan itu sendiri dihapus agar partikel fokus ke teks.
+            if (currentMode === 'scatter' && !isFist) {
+                const dx = posAttr.array[ix] - handPos.x;
+                const dy = posAttr.array[iy] - handPos.y;
+                const dz = posAttr.array[iz] - handPos.z;
+                const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
+
+                if (dist < radiusLimit) {
+                    const pushForce = (1 - dist / radiusLimit) * forceMult;
+                    // Saat menyebar, tangan selalu mendorong
+                    velocities[ix] += dx * pushForce;
+                    velocities[iy] += dy * pushForce;
+                    velocities[iz] += dz * pushForce;
+                }
+            }
+
+
+            // 3. Apply velocity and damping
+            posAttr.array[ix] += velocities[ix];
+            posAttr.array[iy] += velocities[iy];
+            posAttr.array[iz] += velocities[iz];
+
+            velocities[ix] *= settings.damping;
+            velocities[iy] *= settings.damping;
+            velocities[iz] *= settings.damping;
+        }
+
+        posAttr.needsUpdate = true;
+        renderer.render(scene, camera);
+    }
+
+    window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    animate();
+</script>
+</body>
+</html>
